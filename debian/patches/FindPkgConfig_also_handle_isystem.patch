@@ -1,0 +1,122 @@
+From 4d446c68d10a98a9b790ef75c22ecbcc52351fbc Mon Sep 17 00:00:00 2001
+From: Rolf Eike Beer <eike@sf-mail.de>
+Date: Thu, 30 Apr 2020 14:19:04 +0200
+Subject: [PATCH] FindPkgConfig: also handle "-isystem" prefixes for include
+ directories
+
+Fixes: #20652
+---
+ Modules/FindPkgConfig.cmake                   | 50 ++++++++++++++++---
+ .../FindPkgConfig_IMPORTED_TARGET.cmake       | 22 +++++++-
+ 2 files changed, 63 insertions(+), 9 deletions(-)
+
+diff --git a/Modules/FindPkgConfig.cmake b/Modules/FindPkgConfig.cmake
+index bd1bc7c219..2121f66e33 100644
+--- a/Modules/FindPkgConfig.cmake
++++ b/Modules/FindPkgConfig.cmake
+@@ -364,6 +364,36 @@ macro(_pkg_restore_path_internal)
+   unset(_pkgconfig_path_old)
+ endmacro()
+ 
++# pkg-config returns -isystem include directories in --cflags-only-other,
++# depending on the version and if there is a space between -isystem and
++# the actual path
++function(_pkgconfig_extract_isystem _prefix)
++  set(cflags "${${_prefix}_CFLAGS_OTHER}")
++  set(outflags "")
++  set(incdirs "${${_prefix}_INCLUDE_DIRS}")
++
++  set(next_is_isystem FALSE)
++  foreach (THING IN LISTS cflags)
++    # This may filter "-isystem -isystem". That would not work anyway,
++    # so let it happen.
++    if (THING STREQUAL "-isystem")
++      set(next_is_isystem TRUE)
++      continue()
++    endif ()
++    if (next_is_isystem)
++      set(next_is_isystem FALSE)
++      list(APPEND incdirs "${THING}")
++    elseif (THING MATCHES "^-isystem")
++      string(SUBSTRING "${THING}" 8 -1 THING)
++      list(APPEND incdirs "${THING}")
++    else ()
++      list(APPEND outflags "${THING}")
++    endif ()
++  endforeach ()
++  set(${_prefix}_CFLAGS_OTHER "${outflags}" PARENT_SCOPE)
++  set(${_prefix}_INCLUDE_DIRS "${incdirs}" PARENT_SCOPE)
++endfunction()
++
+ ###
+ macro(_pkg_check_modules_internal _is_required _is_silent _no_cmake_path _no_cmake_environment_path _imp_target _imp_target_global _prefix)
+   _pkgconfig_unset(${_prefix}_FOUND)
+@@ -497,14 +527,18 @@ macro(_pkg_check_modules_internal _is_required _is_silent _no_cmake_path _no_cma
+       endforeach()
+ 
+       # set variables which are combined for multiple modules
+-      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" LIBRARIES           "(^| )-l" --libs-only-l )
+-      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" LIBRARY_DIRS        "(^| )-L" --libs-only-L )
+-      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" LDFLAGS             ""        --libs )
+-      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" LDFLAGS_OTHER       ""        --libs-only-other )
+-
+-      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" INCLUDE_DIRS        "(^| )-I" --cflags-only-I )
+-      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" CFLAGS              ""        --cflags )
+-      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" CFLAGS_OTHER        ""        --cflags-only-other )
++      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" LIBRARIES     "(^| )-l"             --libs-only-l )
++      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" LIBRARY_DIRS  "(^| )-L"             --libs-only-L )
++      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" LDFLAGS       ""                    --libs )
++      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" LDFLAGS_OTHER ""                    --libs-only-other )
++
++      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" INCLUDE_DIRS  "(^| )(-I|-isystem ?)" --cflags-only-I )
++      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" CFLAGS        ""                    --cflags )
++      _pkgconfig_invoke_dyn("${_pkg_check_modules_packages}" "${_prefix}" CFLAGS_OTHER  ""                    --cflags-only-other )
++
++      if (${_prefix}_CFLAGS_OTHER MATCHES "-isystem")
++        _pkgconfig_extract_isystem("${_prefix}")
++      endif ()
+ 
+       _pkg_recalculate("${_prefix}" ${_no_cmake_path} ${_no_cmake_environment_path} ${_imp_target} ${_imp_target_global})
+     endif()
+diff --git a/Tests/RunCMake/FindPkgConfig/FindPkgConfig_IMPORTED_TARGET.cmake b/Tests/RunCMake/FindPkgConfig/FindPkgConfig_IMPORTED_TARGET.cmake
+index 62bb5de771..d697fc6778 100644
+--- a/Tests/RunCMake/FindPkgConfig/FindPkgConfig_IMPORTED_TARGET.cmake
++++ b/Tests/RunCMake/FindPkgConfig/FindPkgConfig_IMPORTED_TARGET.cmake
+@@ -99,6 +99,7 @@ file(WRITE ${fakePkgDir}/lib/pkgconfig/${pname}.pc
+ Description: Dummy package for FindPkgConfig IMPORTED_TARGET INTERFACE_LINK_OPTIONS test
+ Version: 1.2.3
+ Libs: -e dummy_main
++Cflags: -I/special -isystem /other -isystem/more -DA-isystem/foo
+ ")
+ 
+ set(expected_link_options -e dummy_main)
+@@ -109,7 +110,26 @@ endif()
+ get_target_property(link_options PkgConfig::FakeLinkOptionsPackage INTERFACE_LINK_OPTIONS)
+ if (NOT link_options STREQUAL expected_link_options)
+   message(FATAL_ERROR
+-    "Additional link options not present in INTERFACE_LINK_OPTIONS property"
++    "Additional link options not present in INTERFACE_LINK_OPTIONS property\n"
+     "expected: \"${expected_link_options}\", but got \"${link_options}\""
+   )
+ endif()
++
++get_target_property(inc_dirs PkgConfig::FakeLinkOptionsPackage INTERFACE_INCLUDE_DIRECTORIES)
++set(expected_inc_dirs "/special" "/other" "/more")
++
++if (NOT inc_dirs STREQUAL expected_inc_dirs)
++  message(FATAL_ERROR
++    "Additional include directories not correctly present in INTERFACE_INCLUDE_DIRECTORIES property\n"
++    "expected: \"${expected_inc_dirs}\", got \"${inc_dirs}\""
++  )
++endif ()
++
++get_target_property(c_opts PkgConfig::FakeLinkOptionsPackage INTERFACE_COMPILE_OPTIONS)
++set(expected_c_opts "-DA-isystem/foo") # this is an invalid option, but a good testcase
++if (NOT c_opts STREQUAL expected_c_opts)
++    message(FATAL_ERROR
++      "Additional compile options not present in INTERFACE_COMPILE_OPTIONS property\n"
++      "expected: \"${expected_c_opts}\", got \"${c_opts}\""
++    )
++endif ()
+-- 
+2.26.2
