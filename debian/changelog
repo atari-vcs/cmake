@@ -1,3 +1,10 @@
+cmake (3.16.3-3~bpo10+1atari0) atari; urgency=medium
+
+  * Import from Debian buster-backports.
+  * Set component to development.
+
+ -- Apertis package maintainers <packagers@lists.apertis.org>  Thu, 18 Mar 2021 22:17:59 +0100
+
 cmake (3.16.3-3~bpo10+1) buster-backports; urgency=medium
 
   * Rebuild for buster-backports.
